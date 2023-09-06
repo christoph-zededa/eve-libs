@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -268,29 +271,101 @@ func testHTTPDatastoreNegative(t *testing.T) {
 	})
 }
 
+// testHTTPDatastoreRepeat tests that the client can handle lost packets
+// during a large download stream and recover, by using the Range HTTP header.
+// The tests sets up an "unstable" proxy, which is configured to start dropping and
+// delaying packets after a certain number of bytes have been transferred.
+//
+// The test works as follows:
+//
+//		1- create a large input file with random data, e.g. 100MB
+//		2- hash the input file
+//		3- create a test http server configured to serve the input file
+//		4- start the unstable proxy, pointing to the test http server as the origin,
+//		   configured to drop packets for a fixed period of time, e.g. 40 seconds, after half the file has been transferred
+//		5- download the file using the unstable proxy, which should download half the file, fail for the fixed period of time,
+//	    and then successfully download the rest
+//		6- when download completes, hash the downloaded file
+//		7- check that the hashes match
 func testHTTPDatastoreRepeat(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping HTTP repeat test suite.")
 	} else {
 		t.Log("Running HTTP repeat test suite.")
 
-		go func() {
-			err := newUnstableProxyStart(9999, 80, "cloud-images.ubuntu.com", 1024*1024*100, 40*time.Second, 100)
-			if err != nil {
-				t.Error(err)
+		// make a random file
+		infile := httpDownloadDir + "input"
+		if _, err := os.Stat(infile); err == nil {
+			if err := os.Remove(infile); err != nil {
+				t.Fatalf("unable to remove existing file %s %v", infile, err)
 			}
-		}()
+		}
+		f, err := os.Create(infile)
+		if err != nil {
+			t.Fatalf("unable to create file %s %v", infile, err)
+		}
+		defer f.Close()
+		defer os.RemoveAll(infile)
+		size := 1024 * 1024 * 100
+		bufSize := 1024 * 1024
+		randReader := io.LimitReader(rand.New(rand.NewSource(time.Now().UnixNano())), int64(size))
+		for {
+			buf := make([]byte, bufSize)
+			_, err := randReader.Read(buf)
+			if err != nil && err != io.EOF {
+				t.Fatalf("unable to read from random reader %v", err)
+			}
+			if _, err := f.Write(buf); err != nil {
+				t.Fatalf("unable to write to file %s %v", infile, err)
+			}
+			if err == io.EOF {
+				break
+			}
+		}
+		if _, err := f.Seek(0, 0); err != nil {
+			t.Fatalf("unable to seek to beginning of file %s %v", infile, err)
+		}
+		// get the final file size
+		stat, err := os.Stat(infile)
+		if err != nil {
+			t.Fatalf("unable to stat file %s %v", infile, err)
+		}
+		insize := stat.Size()
 
-		status, msg := operationHTTP(t, httpDownloadDir+"repeat2", "releases/focal/release/ubuntu-20.04.2-preinstalled-server-riscv64.img.xz", "http://127.0.0.1:9999", "", zedUpload.SyncOpDownload, true)
+		inHash, err := sha256File(infile)
+		if err != nil {
+			t.Fatalf("unable to hash input file %v", err)
+		}
+
+		// create the test server
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// have the served file "hiccup", i.e. drop packets for 330 seconds (5.5 minutes) after 50MB have been transferred
+			// 5.5 mins is chosen because the inactivity timeout for the client is 5 minutes
+			http.ServeContent(w, r, "input", time.Now(), newUnstableFileReader(f, uint64(size/2), 330*time.Second, 100, t.Logf))
+		}))
+		defer ts.Close()
+
+		outfile := httpDownloadDir + "repeat2"
+		status, msg := operationHTTP(t, outfile, "path/does/not/matter/with/fixed/server", ts.URL, "", zedUpload.SyncOpDownload, true)
 		if status {
 			t.Errorf("%v", msg)
 		}
-		hashSum, err := sha256File(httpDownloadDir + "repeat2")
+		// get the number of bytes transferred
+		stat, err = os.Stat(outfile)
+		if err != nil {
+			t.Fatalf("unable to stat file %s %v", outfile, err)
+		}
+		outsize := stat.Size()
+		if outsize != insize {
+			t.Fatalf("expected %d bytes, got %d", insize, outsize)
+		}
+
+		hashSum, err := sha256File(outfile)
 		if err != nil {
 			t.Errorf("%v", err)
 		} else {
-			if hashSum != "cd8d892bfff2b7167e51395f462b6096f657e61de325acd97da2272769efa761" {
-				t.Errorf("hash mismatch")
+			if hashSum != inHash {
+				t.Errorf("hash mismatch infile %s outfile %s", inHash, hashSum)
 			}
 		}
 	}
