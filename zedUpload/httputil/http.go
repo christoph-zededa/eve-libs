@@ -303,6 +303,8 @@ func execCmdGet(ctx context.Context, objSize int64, localFile string, host strin
 			// last modified changed, retry from the beginning
 			lastModified = newLastModified
 			forceRestart = true
+			respErr := fmt.Sprintf("last modified changed, do the retry")
+			appendToErrorList(respErr)
 			continue
 		}
 		if resp.StatusCode == http.StatusOK {
