@@ -214,7 +214,6 @@ func execCmdGet(ctx context.Context, objSize int64, localFile string, host strin
 	defer local.Close()
 
 	var errorList []string
-	done := false
 	supportRange := false //is server supports ranges requests, false for the first request
 	forceRestart := false
 	delay := time.Second
@@ -317,30 +316,19 @@ func execCmdGet(ctx context.Context, objSize int64, localFile string, host strin
 		for {
 			var copyErr error
 
-			written, copyErr = io.CopyN(local, resp.Body, chunkSize)
+			written, copyErr = io.CopyN(local, resp.Body, chunkSize);
 			copiedSize += written
 
-			if copyErr != nil {
-				if objSize != copiedSize && objSize != 0 {
-					if innerCtx.Err() != nil {
-						// the error comes from canceled context, which indicates inactivity timeout
-						appendToErrorList("inactivity for %s", inactivityTimeout)
-					} else if errors.Is(copyErr, io.EOF) {
-						appendToErrorList("premature EOF after %d out of %d bytes: %+v", copiedSize, objSize, copyErr)
-					} else {
-						appendToErrorList("error from CopyN after %d out of %d bytes: %v", copiedSize, objSize, copyErr)
-					}
-
-					stats.Error = fmt.Errorf("%s: %s", host, strings.Join(errorList, "; "))
+			if copyErr == io.EOF {
+				// Success path
+				return stats, rsp
+			} else if copyErr != nil {
+				if innerCtx.Err() != nil {
+					// the error comes from canceled context, which indicates inactivity timeout
+					appendToErrorList(fmt.Sprintf("inactivity for %s", inactivityTimeout))
+				} else {
+					appendToErrorList(fmt.Sprintf("error from CopyN: %v", copyErr))
 				}
-				break
-			}
-			copiedSize += written
-			// we read chunk of data from response on each iteration, if data length is a multiple of chunkSize
-			// on the last iteration we will read 0 bytes and will hit written != chunkSize
-			if written != chunkSize {
-				// Must have reached EOF
-				done = true
 				break
 			}
 			//we received data so re-schedule inactivity timer
@@ -348,12 +336,10 @@ func execCmdGet(ctx context.Context, objSize int64, localFile string, host strin
 			stats.Asize = copiedSize
 			types.SendStats(prgNotify, stats)
 		}
-		if done {
-			break
-		}
 	}
-	if !done {
-		stats.Error = fmt.Errorf("%s: %s", host, strings.Join(errorList, "; "))
-	}
+	// This is an error path, when all attempts were tried without a
+	// success. We always expect there is something in the error list.
+	stats.Error = fmt.Errorf("%s: %s", host, strings.Join(errorList, "; "))
+
 	return stats, rsp
 }
