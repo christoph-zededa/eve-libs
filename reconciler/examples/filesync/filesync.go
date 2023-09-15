@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 
@@ -44,7 +43,7 @@ func (d *demo) run() {
 	const graphName = "Reconciler Demo"
 
 	// Create root directory for our file-sync demo.
-	rootDirname, err := ioutil.TempDir("/tmp", "file-sync-demo-")
+	rootDirname, err := os.MkdirTemp("/tmp", "file-sync-demo-")
 	if err != nil {
 		log.Fatalf("Failed to create root directory for the demo: %v", err)
 	}

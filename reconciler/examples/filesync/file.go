@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strconv"
 
@@ -90,7 +89,7 @@ type fileConfigurator struct{}
 // Create writes a new file.
 func (fc fileConfigurator) Create(_ context.Context, item depgraph.Item) error {
 	f := item.(file)
-	return ioutil.WriteFile(f.path(), []byte(f.content), f.permissions)
+	return os.WriteFile(f.path(), []byte(f.content), f.permissions)
 }
 
 // Modify can rename the file and change the access rights.
